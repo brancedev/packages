@@ -1388,8 +1388,6 @@ NSString *const errorMethod = @"error";
   });
 }
 
-// Modify the checkDistanceAndSwitchLensIfNeeded method in FLTCam.m
-
 - (void)checkDistanceAndSwitchLensIfNeeded {
   __weak typeof(self) weakSelf = self;
   dispatch_async(_captureSessionQueue, ^{
@@ -1452,15 +1450,20 @@ NSString *const errorMethod = @"error";
         targetDeviceType = @"Wide";
       }
     } else if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
-      // On wide, only switch to telephoto for clearly distant objects
-      if (strongSelf->_estimatedObjectDistance > 7.0 &&
-          strongSelf->_availableCamerasByType[@"Telephoto"]) {
+      if (strongSelf->_estimatedObjectDistance < 1.0) {
+        if (strongSelf->_availableCamerasByType[@"Macro"]) {
+          newCamera = strongSelf->_availableCamerasByType[@"Macro"];
+          targetDeviceType = @"Macro";
+        } else if (strongSelf->_availableCamerasByType[@"UltraWide"]) {
+          newCamera = strongSelf->_availableCamerasByType[@"UltraWide"];
+          targetDeviceType = @"UltraWide";
+        }
+      } else if (strongSelf->_estimatedObjectDistance > 7.0 &&
+                 strongSelf->_availableCamerasByType[@"Telephoto"]) {
         newCamera = strongSelf->_availableCamerasByType[@"Telephoto"];
         targetDeviceType = @"Telephoto";
       }
-      // Don't switch to ultra-wide for close objects on iPhone 12 Pro as it doesn't have macro
     } else if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
-      // Switch from ultra-wide to wide for medium distances (more conservative)
       if (strongSelf->_estimatedObjectDistance > 1.0 &&
           strongSelf->_availableCamerasByType[@"Wide"]) {
         newCamera = strongSelf->_availableCamerasByType[@"Wide"];
