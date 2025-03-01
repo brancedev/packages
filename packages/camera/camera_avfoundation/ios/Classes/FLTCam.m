@@ -1344,6 +1344,12 @@ NSString *const errorMethod = @"error";
   _autoLensSwitchingEnabled = YES;
   _availableCamerasByType = [NSMutableDictionary dictionary];
 
+  // Initialize with a middle distance to prevent immediate switching
+  _estimatedObjectDistance = 1.0;
+
+  // Initialize last switch time
+  _lastSwitchTime = CACurrentMediaTime();
+
   for (AVCaptureDevice *device in availableCameras) {
     if ([device position] == [_captureDevice position]) {  // Same position (front/back)
       if (@available(iOS 13.0, *)) {
@@ -1387,14 +1393,33 @@ NSString *const errorMethod = @"error";
       return;
     }
 
-    // Update estimated distance based on lens position
-    // lensPosition ranges from 0.0 (infinity) to 1.0 (closest focus)
-    float lensPosition = strongSelf->_captureDevice.lensPosition;
-    float newDistance = (1.0 - lensPosition) * 10.0;  // Rough approximation in meters
+    // Don't switch if we're in cooldown period (3 seconds after init or last switch)
+    NSTimeInterval currentTime = CACurrentMediaTime();
+    if (currentTime - strongSelf->_lastSwitchTime < 3.0) {
+      return;
+    }
 
-    // Only update if distance has changed significantly (hysteresis)
-    if (fabs(newDistance - strongSelf->_estimatedObjectDistance) > 0.5) {
-      strongSelf->_estimatedObjectDistance = newDistance;
+    // Combine lens position with zoom factor for better distance estimation
+    float lensPosition = strongSelf->_captureDevice.lensPosition;
+    float zoomFactor = strongSelf->_captureDevice.videoZoomFactor;
+
+    // Adjust the distance formula - lower values for telephoto
+    float baseDistance = (1.0 - lensPosition) * 10.0;
+    float adjustedDistance;
+
+    if ([strongSelf->_captureDevice.deviceType
+            isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
+      adjustedDistance = baseDistance * 0.5;  // Reduce distance estimate for telephoto
+    } else if ([strongSelf->_captureDevice.deviceType
+                   isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
+      adjustedDistance = baseDistance * 1.5;  // Increase distance estimate for ultra-wide
+    } else {
+      adjustedDistance = baseDistance;
+    }
+
+    // Use a larger threshold for distance changes (more hysteresis)
+    if (fabs(adjustedDistance - strongSelf->_estimatedObjectDistance) > 1.0) {
+      strongSelf->_estimatedObjectDistance = adjustedDistance;
 
       // Select appropriate lens based on distance
       AVCaptureDevice *newCamera = nil;
@@ -1413,6 +1438,7 @@ NSString *const errorMethod = @"error";
 
       // Switch to selected lens if different from current
       if (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID]) {
+        strongSelf->_lastSwitchTime = CACurrentMediaTime();  // Update the last switch time
         [strongSelf switchToCamera:newCamera];
       }
     }
@@ -1420,6 +1446,9 @@ NSString *const errorMethod = @"error";
 }
 
 - (void)switchToCamera:(AVCaptureDevice *)newCamera {
+  // Save current flash mode to restore later
+  FCPPlatformFlashMode currentFlashMode = _flashMode;
+
   NSError *error;
   AVCaptureDeviceInput *newInput = [AVCaptureDeviceInput deviceInputWithDevice:newCamera
                                                                          error:&error];
@@ -1490,6 +1519,19 @@ NSString *const errorMethod = @"error";
   // Apply settings to new camera
   [self applyFocusMode];
   [self applyExposureMode];
+
+  // Force an immediate focus after switching lenses
+  if ([_captureDevice isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
+    [_captureDevice lockForConfiguration:nil];
+    [_captureDevice setFocusMode:AVCaptureFocusModeAutoFocus];
+    [_captureDevice unlockForConfiguration];
+  }
+
+  // Restore flash mode
+  [self setFlashMode:currentFlashMode
+      withCompletion:^(FlutterError *_Nullable error){
+          // Ignore errors during restoration
+      }];
 }
 
 @end

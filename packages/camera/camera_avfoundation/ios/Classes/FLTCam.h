@@ -35,6 +35,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(strong, nonatomic) NSMutableDictionary<NSString *, AVCaptureDevice *> *availableCamerasByType;
 @property(assign, nonatomic) float estimatedObjectDistance;
 @property(strong, nonatomic) NSTimer *autoLensSwitchingTimer;
+@property(assign, nonatomic) NSTimeInterval lastSwitchTime;
 
 /// Initializes an `FLTCam` instance.
 /// @param cameraName a name used to uniquely identify the camera.
