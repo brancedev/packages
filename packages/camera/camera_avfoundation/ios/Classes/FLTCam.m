@@ -1396,8 +1396,6 @@ NSString *const errorMethod = @"error";
     // Don't switch if we're in cooldown period (3 seconds after init or last switch)
     NSTimeInterval currentTime = CACurrentMediaTime();
     if (currentTime - strongSelf->_lastSwitchTime < 3.0) {
-      NSLog(@"[AutoLensSwitch] In cooldown period: %f seconds remaining",
-            3.0 - (currentTime - strongSelf->_lastSwitchTime));
       return;
     }
 
@@ -1408,8 +1406,6 @@ NSString *const errorMethod = @"error";
     // Adjust the distance formula - lower values for telephoto
     float baseDistance = (1.0 - lensPosition) * 10.0;
     float adjustedDistance;
-    NSLog(@"[AutoLensSwitch] Lens position: %f, Zoom factor: %f, Base distance: %f", lensPosition,
-          zoomFactor, baseDistance);
 
     if ([strongSelf->_captureDevice.deviceType
             isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
@@ -1421,41 +1417,72 @@ NSString *const errorMethod = @"error";
       adjustedDistance = baseDistance;
     }
 
-    NSLog(@"[AutoLensSwitch] Current camera: %@, Adjusted distance: %f",
-          strongSelf->_captureDevice.deviceType, adjustedDistance);
+    // Add exponential smoothing to reduce noisy measurements (alpha = 0.3)
+    float alpha = 0.3;
+    float smoothedDistance =
+        alpha * adjustedDistance + (1 - alpha) * strongSelf->_estimatedObjectDistance;
 
-    // Use a larger threshold for distance changes (more hysteresis)
-    if (fabs(adjustedDistance - strongSelf->_estimatedObjectDistance) > 1.0) {
-      strongSelf->_estimatedObjectDistance = adjustedDistance;
+    // Only update the stored distance if it's substantially different
+    if (fabs(smoothedDistance - strongSelf->_estimatedObjectDistance) > 0.5) {
+      strongSelf->_estimatedObjectDistance = smoothedDistance;
 
-      // Select appropriate lens based on distance
+      // Use different thresholds for switching to vs. switching from telephoto (hysteresis)
+      BOOL shouldSwitchToTelephoto = NO;
+      BOOL shouldSwitchToWide = NO;
+      BOOL shouldSwitchToUltraWide = NO;
+
+      // Determine which lens to use with improved hysteresis thresholds
+      if ([strongSelf->_captureDevice.deviceType
+              isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
+        // Currently on telephoto, need more aggressive threshold to switch away
+        shouldSwitchToWide = strongSelf->_estimatedObjectDistance < 1.2;
+        shouldSwitchToUltraWide = strongSelf->_estimatedObjectDistance < 0.3;
+      } else if ([strongSelf->_captureDevice.deviceType
+                     isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
+        // Currently on wide, need higher threshold to switch to telephoto
+        shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 2.5;
+        shouldSwitchToUltraWide = strongSelf->_estimatedObjectDistance < 0.3;
+      } else if ([strongSelf->_captureDevice.deviceType
+                     isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
+        // Currently on ultra-wide, need higher threshold to switch away
+        shouldSwitchToWide = strongSelf->_estimatedObjectDistance > 0.5;
+        shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 2.5;
+      }
+
+      // Select appropriate lens based on calculated thresholds
       AVCaptureDevice *newCamera = nil;
-      if (strongSelf->_estimatedObjectDistance < 0.1 &&
-          strongSelf->_availableCamerasByType[@"UltraWide"]) {
-        // Very close objects - use ultra-wide for macro
+      if (shouldSwitchToUltraWide && strongSelf->_availableCamerasByType[@"UltraWide"]) {
         newCamera = strongSelf->_availableCamerasByType[@"UltraWide"];
-      } else if (strongSelf->_estimatedObjectDistance > 2.0 &&
-                 strongSelf->_availableCamerasByType[@"Telephoto"]) {
-        // Far objects - use telephoto for zoom
+      } else if (shouldSwitchToTelephoto && strongSelf->_availableCamerasByType[@"Telephoto"]) {
         newCamera = strongSelf->_availableCamerasByType[@"Telephoto"];
-      } else if (strongSelf->_availableCamerasByType[@"Wide"]) {
-        // Default to wide angle for normal distances
+      } else if (shouldSwitchToWide && strongSelf->_availableCamerasByType[@"Wide"]) {
         newCamera = strongSelf->_availableCamerasByType[@"Wide"];
       }
 
-      NSString *targetLensType = @"None";
+      // Log the decision making process with more details
+      NSString *currentLens = strongSelf->_captureDevice.deviceType;
+      NSString *targetLens = @"None";
       if (newCamera) {
-        targetLensType = newCamera.deviceType;
+        targetLens = newCamera.deviceType;
       }
-      NSLog(@"[AutoLensSwitch] Target lens: %@, Will switch: %@", targetLensType,
-            (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID])
-                ? @"YES"
-                : @"NO");
 
-      // Switch to selected lens if different from current
+      NSLog(@"[AutoLensSwitch] Analysis: Current=%@, Distance=%.2f, ShouldSwitchToTele=%d, "
+            @"ShouldSwitchToWide=%d, ShouldSwitchToUltra=%d",
+            currentLens, strongSelf->_estimatedObjectDistance, shouldSwitchToTelephoto,
+            shouldSwitchToWide, shouldSwitchToUltraWide);
+
+      // Switch to selected lens if different from current and meets stability criteria
       if (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID]) {
-        strongSelf->_lastSwitchTime = CACurrentMediaTime();  // Update the last switch time
-        [strongSelf switchToCamera:newCamera];
+        // Extra stability check - make sure focus is stable
+        BOOL isFocusChanging = strongSelf->_captureDevice.isAdjustingFocus;
+
+        if (!isFocusChanging) {
+          NSLog(@"[AutoLensSwitch] Switching from %@ to %@", currentLens, targetLens);
+          strongSelf->_lastSwitchTime = CACurrentMediaTime();  // Update the last switch time
+          [strongSelf switchToCamera:newCamera];
+        } else {
+          NSLog(@"[AutoLensSwitch] Delaying switch while focus is adjusting");
+        }
       }
     }
   });
