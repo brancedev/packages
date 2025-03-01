@@ -787,6 +787,11 @@ NSString *const errorMethod = @"error";
 }
 
 - (void)dealloc {
+  if (_autoLensSwitchingTimer) {
+    [_autoLensSwitchingTimer invalidate];
+    _autoLensSwitchingTimer = nil;
+  }
+
   if (_latestPixelBuffer) {
     CFRelease(_latestPixelBuffer);
   }
@@ -1333,6 +1338,158 @@ NSString *const errorMethod = @"error";
                            // Ignore any errors, as this is just an event broadcast.
                        }];
   });
+}
+
+- (void)setupAutoLensSwitchingWithAvailableCameras:(NSArray<AVCaptureDevice *> *)availableCameras {
+  _autoLensSwitchingEnabled = YES;
+  _availableCamerasByType = [NSMutableDictionary dictionary];
+
+  for (AVCaptureDevice *device in availableCameras) {
+    if ([device position] == [_captureDevice position]) {  // Same position (front/back)
+      if (@available(iOS 13.0, *)) {
+        if ([device.deviceType isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
+          _availableCamerasByType[@"UltraWide"] = device;
+        }
+      }
+      if ([device.deviceType isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
+        _availableCamerasByType[@"Wide"] = device;
+      }
+      if ([device.deviceType isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
+        _availableCamerasByType[@"Telephoto"] = device;
+      }
+    }
+  }
+
+  // Stop any existing timer
+  if (_autoLensSwitchingTimer) {
+    [_autoLensSwitchingTimer invalidate];
+    _autoLensSwitchingTimer = nil;
+  }
+
+  // Setup timer to check distance and switch lenses
+  dispatch_async(dispatch_get_main_queue(), ^{
+    self->_autoLensSwitchingTimer =
+        [NSTimer scheduledTimerWithTimeInterval:0.5
+                                         target:self
+                                       selector:@selector(checkDistanceAndSwitchLensIfNeeded)
+                                       userInfo:nil
+                                        repeats:YES];
+  });
+}
+
+- (void)checkDistanceAndSwitchLensIfNeeded {
+  __weak typeof(self) weakSelf = self;
+  dispatch_async(_captureSessionQueue, ^{
+    typeof(self) strongSelf = weakSelf;
+    if (!strongSelf) return;
+
+    if (!strongSelf->_autoLensSwitchingEnabled || strongSelf->_isRecording) {
+      return;
+    }
+
+    // Update estimated distance based on lens position
+    // lensPosition ranges from 0.0 (infinity) to 1.0 (closest focus)
+    float lensPosition = strongSelf->_captureDevice.lensPosition;
+    float newDistance = (1.0 - lensPosition) * 10.0;  // Rough approximation in meters
+
+    // Only update if distance has changed significantly (hysteresis)
+    if (fabs(newDistance - strongSelf->_estimatedObjectDistance) > 0.5) {
+      strongSelf->_estimatedObjectDistance = newDistance;
+
+      // Select appropriate lens based on distance
+      AVCaptureDevice *newCamera = nil;
+      if (strongSelf->_estimatedObjectDistance < 0.1 &&
+          strongSelf->_availableCamerasByType[@"UltraWide"]) {
+        // Very close objects - use ultra-wide for macro
+        newCamera = strongSelf->_availableCamerasByType[@"UltraWide"];
+      } else if (strongSelf->_estimatedObjectDistance > 2.0 &&
+                 strongSelf->_availableCamerasByType[@"Telephoto"]) {
+        // Far objects - use telephoto for zoom
+        newCamera = strongSelf->_availableCamerasByType[@"Telephoto"];
+      } else if (strongSelf->_availableCamerasByType[@"Wide"]) {
+        // Default to wide angle for normal distances
+        newCamera = strongSelf->_availableCamerasByType[@"Wide"];
+      }
+
+      // Switch to selected lens if different from current
+      if (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID]) {
+        [strongSelf switchToCamera:newCamera];
+      }
+    }
+  });
+}
+
+- (void)switchToCamera:(AVCaptureDevice *)newCamera {
+  NSError *error;
+  AVCaptureDeviceInput *newInput = [AVCaptureDeviceInput deviceInputWithDevice:newCamera
+                                                                         error:&error];
+  if (error) {
+    [self reportErrorMessage:error.description];
+    return;
+  }
+
+  // Get old connection
+  AVCaptureConnection *oldConnection =
+      [_captureVideoOutput connectionWithMediaType:AVMediaTypeVideo];
+
+  // Stop video capture
+  [_captureVideoOutput setSampleBufferDelegate:nil queue:nil];
+
+  // Begin configuration
+  [_videoCaptureSession beginConfiguration];
+
+  // Remove old input and output
+  [_videoCaptureSession removeInput:_captureVideoInput];
+  [_videoCaptureSession removeOutput:_captureVideoOutput];
+
+  // Update capture device and input
+  _captureDevice = newCamera;
+  _captureVideoInput = newInput;
+
+  // Add new input and output
+  if ([_videoCaptureSession canAddInput:_captureVideoInput]) {
+    [_videoCaptureSession addInputWithNoConnections:_captureVideoInput];
+  } else {
+    [self reportErrorMessage:@"Unable to add new video input"];
+    [_videoCaptureSession commitConfiguration];
+    return;
+  }
+
+  if ([_videoCaptureSession canAddOutput:_captureVideoOutput]) {
+    [_videoCaptureSession addOutputWithNoConnections:_captureVideoOutput];
+  } else {
+    [self reportErrorMessage:@"Unable to add new video output"];
+    [_videoCaptureSession commitConfiguration];
+    return;
+  }
+
+  // Create and add new connection
+  AVCaptureConnection *newConnection =
+      [AVCaptureConnection connectionWithInputPorts:_captureVideoInput.ports
+                                             output:_captureVideoOutput];
+
+  // Preserve orientation
+  if (oldConnection && newConnection.isVideoOrientationSupported) {
+    newConnection.videoOrientation = oldConnection.videoOrientation;
+  }
+
+  if ([_videoCaptureSession canAddConnection:newConnection]) {
+    [_videoCaptureSession addConnection:newConnection];
+  } else {
+    [self reportErrorMessage:@"Unable to add new video connection"];
+    [_videoCaptureSession commitConfiguration];
+    return;
+  }
+
+  // Commit configuration
+  [_videoCaptureSession commitConfiguration];
+
+  // Restore delegate
+  [_captureVideoOutput setSampleBufferDelegate:self queue:_captureSessionQueue];
+
+  // Apply settings to new camera
+  [self applyFocusMode];
+  [self applyExposureMode];
 }
 
 @end

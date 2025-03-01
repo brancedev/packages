@@ -482,6 +482,22 @@ static FlutterError *FlutterErrorFromNSError(NSError *error) {
   } else {
     [_camera close];
     _camera = cam;
+    // Get all available cameras for auto lens switching
+    NSMutableArray *discoveryDevices =
+        [@[ AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeBuiltInTelephotoCamera ]
+            mutableCopy];
+    if (@available(iOS 13.0, *)) {
+      [discoveryDevices addObject:AVCaptureDeviceTypeBuiltInUltraWideCamera];
+    }
+    AVCaptureDeviceDiscoverySession *discoverySession = [AVCaptureDeviceDiscoverySession
+        discoverySessionWithDeviceTypes:discoveryDevices
+                              mediaType:AVMediaTypeVideo
+                               position:AVCaptureDevicePositionUnspecified];
+    NSArray<AVCaptureDevice *> *devices = discoverySession.devices;
+
+    // Setup auto lens switching
+    [cam setupAutoLensSwitchingWithAvailableCameras:devices];
+
     __weak typeof(self) weakSelf = self;
     FLTEnsureToRunOnMainQueue(^{
       completion(@([weakSelf.registry registerTexture:cam]), nil);

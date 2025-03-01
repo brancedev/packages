@@ -30,6 +30,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property(assign, nonatomic) FCPPlatformImageFileFormat fileFormat;
 @property(assign, nonatomic) CGFloat minimumAvailableZoomFactor;
 @property(assign, nonatomic) CGFloat maximumAvailableZoomFactor;
+// Auto lens switching properties
+@property(assign, nonatomic) BOOL autoLensSwitchingEnabled;
+@property(strong, nonatomic) NSMutableDictionary<NSString *, AVCaptureDevice *> *availableCamerasByType;
+@property(assign, nonatomic) float estimatedObjectDistance;
+@property(strong, nonatomic) NSTimer *autoLensSwitchingTimer;
 
 /// Initializes an `FLTCam` instance.
 /// @param cameraName a name used to uniquely identify the camera.
@@ -114,6 +119,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)stopImageStream;
 - (void)setZoomLevel:(CGFloat)zoom withCompletion:(void (^)(FlutterError *_Nullable))completion;
 - (void)setUpCaptureSessionForAudio;
+
+// Auto lens switching method
+- (void)setupAutoLensSwitchingWithAvailableCameras:(NSArray<AVCaptureDevice *> *)availableCameras;
 
 @end
 
