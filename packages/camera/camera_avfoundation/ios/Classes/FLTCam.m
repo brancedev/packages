@@ -1396,6 +1396,8 @@ NSString *const errorMethod = @"error";
     // Don't switch if we're in cooldown period (3 seconds after init or last switch)
     NSTimeInterval currentTime = CACurrentMediaTime();
     if (currentTime - strongSelf->_lastSwitchTime < 3.0) {
+      NSLog(@"[AutoLensSwitch] In cooldown period: %f seconds remaining",
+            3.0 - (currentTime - strongSelf->_lastSwitchTime));
       return;
     }
 
@@ -1406,6 +1408,8 @@ NSString *const errorMethod = @"error";
     // Adjust the distance formula - lower values for telephoto
     float baseDistance = (1.0 - lensPosition) * 10.0;
     float adjustedDistance;
+    NSLog(@"[AutoLensSwitch] Lens position: %f, Zoom factor: %f, Base distance: %f", lensPosition,
+          zoomFactor, baseDistance);
 
     if ([strongSelf->_captureDevice.deviceType
             isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
@@ -1416,6 +1420,9 @@ NSString *const errorMethod = @"error";
     } else {
       adjustedDistance = baseDistance;
     }
+
+    NSLog(@"[AutoLensSwitch] Current camera: %@, Adjusted distance: %f",
+          strongSelf->_captureDevice.deviceType, adjustedDistance);
 
     // Use a larger threshold for distance changes (more hysteresis)
     if (fabs(adjustedDistance - strongSelf->_estimatedObjectDistance) > 1.0) {
@@ -1435,6 +1442,15 @@ NSString *const errorMethod = @"error";
         // Default to wide angle for normal distances
         newCamera = strongSelf->_availableCamerasByType[@"Wide"];
       }
+
+      NSString *targetLensType = @"None";
+      if (newCamera) {
+        targetLensType = newCamera.deviceType;
+      }
+      NSLog(@"[AutoLensSwitch] Target lens: %@, Will switch: %@", targetLensType,
+            (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID])
+                ? @"YES"
+                : @"NO");
 
       // Switch to selected lens if different from current
       if (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID]) {
