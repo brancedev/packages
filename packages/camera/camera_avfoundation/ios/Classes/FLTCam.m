@@ -1412,10 +1412,19 @@ NSString *const errorMethod = @"error";
       adjustedDistance = baseDistance * 0.5;  // Reduce distance estimate for telephoto
     } else if ([strongSelf->_captureDevice.deviceType
                    isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
-      adjustedDistance = baseDistance * 1.5;  // Increase distance estimate for ultra-wide
+      // Check if device supports macro (generally focus distance < 0.1 means macro capability)
+      BOOL hasMacroCapability = [strongSelf->_captureDevice minimumFocusDistance] < 0.1;
+      if (hasMacroCapability) {
+        // For ultra-wide with macro, handling close distances better
+        adjustedDistance = baseDistance * 1.2;
+      } else {
+        adjustedDistance = baseDistance * 1.5;  // Standard ultra-wide adjustment
+      }
     } else {
       adjustedDistance = baseDistance;
     }
+
+    NSLog(@"[AutoLensSwitch] adjustedDistance: %.2f", adjustedDistance);
 
     // Add exponential smoothing to reduce noisy measurements (alpha = 0.3)
     float alpha = 0.3;
@@ -1431,22 +1440,38 @@ NSString *const errorMethod = @"error";
       BOOL shouldSwitchToWide = NO;
       BOOL shouldSwitchToUltraWide = NO;
 
+      // Check if ultra-wide has macro capability
+      BOOL ultraWideHasMacro = NO;
+      if (strongSelf->_availableCamerasByType[@"UltraWide"]) {
+        AVCaptureDevice *ultraWideDevice = strongSelf->_availableCamerasByType[@"UltraWide"];
+        ultraWideHasMacro = [ultraWideDevice minimumFocusDistance] < 0.1;
+      }
+
       // Determine which lens to use with improved hysteresis thresholds
       if ([strongSelf->_captureDevice.deviceType
               isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
         // Currently on telephoto, need more aggressive threshold to switch away
-        shouldSwitchToWide = strongSelf->_estimatedObjectDistance < 1.2;
-        shouldSwitchToUltraWide = strongSelf->_estimatedObjectDistance < 0.3;
+        // For barcode scanning scenarios, prioritize wide-angle lens for medium distances
+        shouldSwitchToWide = strongSelf->_estimatedObjectDistance < 4.0;
+        // For close scanning with macro-capable ultra-wide
+        shouldSwitchToUltraWide = ultraWideHasMacro && strongSelf->_estimatedObjectDistance < 0.8;
       } else if ([strongSelf->_captureDevice.deviceType
                      isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
-        // Currently on wide, need higher threshold to switch to telephoto
-        shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 2.5;
-        shouldSwitchToUltraWide = strongSelf->_estimatedObjectDistance < 0.3;
+        // Currently on wide, only switch to telephoto for very distant subjects
+        shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 6.0;
+        // For macro devices, prefer ultra-wide for barcode scanning distances
+        shouldSwitchToUltraWide = ultraWideHasMacro && (strongSelf->_estimatedObjectDistance < 0.8);
       } else if ([strongSelf->_captureDevice.deviceType
                      isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
-        // Currently on ultra-wide, need higher threshold to switch away
-        shouldSwitchToWide = strongSelf->_estimatedObjectDistance > 0.5;
-        shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 2.5;
+        // For macro-capable ultra-wide, stay on this camera for typical barcode scanning distances
+        if (ultraWideHasMacro) {
+          shouldSwitchToWide = strongSelf->_estimatedObjectDistance > 1.5;
+          shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 6.0;
+        } else {
+          // Non-macro ultra-wide should switch to wide for better quality at medium distances
+          shouldSwitchToWide = strongSelf->_estimatedObjectDistance > 0.5;
+          shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 6.0;
+        }
       }
 
       // Select appropriate lens based on calculated thresholds
