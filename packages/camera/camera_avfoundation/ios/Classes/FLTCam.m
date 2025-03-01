@@ -771,6 +771,11 @@ NSString *const errorMethod = @"error";
 }
 
 - (void)close {
+  if (_autoLensSwitchingTimer) {
+    [_autoLensSwitchingTimer invalidate];
+    _autoLensSwitchingTimer = nil;
+  }
+
   [self stop];
   for (AVCaptureInput *input in [_videoCaptureSession inputs]) {
     [_videoCaptureSession removeInput:input];
@@ -1383,6 +1388,8 @@ NSString *const errorMethod = @"error";
   });
 }
 
+// Modify the checkDistanceAndSwitchLensIfNeeded method in FLTCam.m
+
 - (void)checkDistanceAndSwitchLensIfNeeded {
   __weak typeof(self) weakSelf = self;
   dispatch_async(_captureSessionQueue, ^{
@@ -1407,108 +1414,68 @@ NSString *const errorMethod = @"error";
     float baseDistance = (1.0 - lensPosition) * 10.0;
     float adjustedDistance;
 
+    // Improved distance calculation based on lens type
     if ([strongSelf->_captureDevice.deviceType
             isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
       adjustedDistance = baseDistance * 0.5;  // Reduce distance estimate for telephoto
     } else if ([strongSelf->_captureDevice.deviceType
                    isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
-      // Check if device supports macro (generally focus distance < 0.1 means macro capability)
-      BOOL hasMacroCapability = [strongSelf->_captureDevice minimumFocusDistance] < 0.1;
-      if (hasMacroCapability) {
-        // For ultra-wide with macro, handling close distances better
-        adjustedDistance = baseDistance * 1.2;
-      } else {
-        adjustedDistance = baseDistance * 1.5;  // Standard ultra-wide adjustment
-      }
+      // More conservative approach - don't assume ultra-wide has macro capability
+      adjustedDistance = baseDistance * 1.5;
     } else {
       adjustedDistance = baseDistance;
     }
-
-    NSLog(@"[AutoLensSwitch] adjustedDistance: %.2f", adjustedDistance);
 
     // Add exponential smoothing to reduce noisy measurements (alpha = 0.3)
     float alpha = 0.3;
     float smoothedDistance =
         alpha * adjustedDistance + (1 - alpha) * strongSelf->_estimatedObjectDistance;
+    strongSelf->_estimatedObjectDistance = smoothedDistance;
 
-    // Only update the stored distance if it's substantially different
-    if (fabs(smoothedDistance - strongSelf->_estimatedObjectDistance) > 0.5) {
-      strongSelf->_estimatedObjectDistance = smoothedDistance;
+    // Check focus status
+    BOOL isFocusChanging = strongSelf->_captureDevice.isAdjustingFocus;
+    if (isFocusChanging) {
+      return;  // Don't switch while focus is adjusting
+    }
 
-      // Use different thresholds for switching to vs. switching from telephoto (hysteresis)
-      BOOL shouldSwitchToTelephoto = NO;
-      BOOL shouldSwitchToWide = NO;
-      BOOL shouldSwitchToUltraWide = NO;
+    // Determine which lens to use with device-appropriate thresholds
+    NSString *currentLens = strongSelf->_captureDevice.deviceType;
+    AVCaptureDevice *newCamera = nil;
+    NSString *targetDeviceType = nil;
 
-      // Check if ultra-wide has macro capability
-      BOOL ultraWideHasMacro = NO;
-      if (strongSelf->_availableCamerasByType[@"UltraWide"]) {
-        AVCaptureDevice *ultraWideDevice = strongSelf->_availableCamerasByType[@"UltraWide"];
-        ultraWideHasMacro = [ultraWideDevice minimumFocusDistance] < 0.1;
-      }
-
-      // Determine which lens to use with improved hysteresis thresholds
-      if ([strongSelf->_captureDevice.deviceType
-              isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
-        // Currently on telephoto, need more aggressive threshold to switch away
-        // For barcode scanning scenarios, prioritize wide-angle lens for medium distances
-        shouldSwitchToWide = strongSelf->_estimatedObjectDistance < 4.0;
-        // For close scanning with macro-capable ultra-wide
-        shouldSwitchToUltraWide = ultraWideHasMacro && strongSelf->_estimatedObjectDistance < 0.8;
-      } else if ([strongSelf->_captureDevice.deviceType
-                     isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
-        // Currently on wide, only switch to telephoto for very distant subjects
-        shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 6.0;
-        // For macro devices, prefer ultra-wide for barcode scanning distances
-        shouldSwitchToUltraWide = ultraWideHasMacro && (strongSelf->_estimatedObjectDistance < 0.8);
-      } else if ([strongSelf->_captureDevice.deviceType
-                     isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
-        // For macro-capable ultra-wide, stay on this camera for typical barcode scanning distances
-        if (ultraWideHasMacro) {
-          shouldSwitchToWide = strongSelf->_estimatedObjectDistance > 1.5;
-          shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 6.0;
-        } else {
-          // Non-macro ultra-wide should switch to wide for better quality at medium distances
-          shouldSwitchToWide = strongSelf->_estimatedObjectDistance > 0.5;
-          shouldSwitchToTelephoto = strongSelf->_estimatedObjectDistance > 6.0;
-        }
-      }
-
-      // Select appropriate lens based on calculated thresholds
-      AVCaptureDevice *newCamera = nil;
-      if (shouldSwitchToUltraWide && strongSelf->_availableCamerasByType[@"UltraWide"]) {
-        newCamera = strongSelf->_availableCamerasByType[@"UltraWide"];
-      } else if (shouldSwitchToTelephoto && strongSelf->_availableCamerasByType[@"Telephoto"]) {
-        newCamera = strongSelf->_availableCamerasByType[@"Telephoto"];
-      } else if (shouldSwitchToWide && strongSelf->_availableCamerasByType[@"Wide"]) {
+    // IMPROVED LENS SELECTION LOGIC
+    if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
+      // On telephoto, switch to wide if distance is less than 4.5 (more aggressive)
+      if (strongSelf->_estimatedObjectDistance < 4.5 &&
+          strongSelf->_availableCamerasByType[@"Wide"]) {
         newCamera = strongSelf->_availableCamerasByType[@"Wide"];
+        targetDeviceType = @"Wide";
       }
-
-      // Log the decision making process with more details
-      NSString *currentLens = strongSelf->_captureDevice.deviceType;
-      NSString *targetLens = @"None";
-      if (newCamera) {
-        targetLens = newCamera.deviceType;
+    } else if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
+      // On wide, only switch to telephoto for clearly distant objects
+      if (strongSelf->_estimatedObjectDistance > 7.0 &&
+          strongSelf->_availableCamerasByType[@"Telephoto"]) {
+        newCamera = strongSelf->_availableCamerasByType[@"Telephoto"];
+        targetDeviceType = @"Telephoto";
       }
-
-      NSLog(@"[AutoLensSwitch] Analysis: Current=%@, Distance=%.2f, ShouldSwitchToTele=%d, "
-            @"ShouldSwitchToWide=%d, ShouldSwitchToUltra=%d",
-            currentLens, strongSelf->_estimatedObjectDistance, shouldSwitchToTelephoto,
-            shouldSwitchToWide, shouldSwitchToUltraWide);
-
-      // Switch to selected lens if different from current and meets stability criteria
-      if (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID]) {
-        // Extra stability check - make sure focus is stable
-        BOOL isFocusChanging = strongSelf->_captureDevice.isAdjustingFocus;
-
-        if (!isFocusChanging) {
-          NSLog(@"[AutoLensSwitch] Switching from %@ to %@", currentLens, targetLens);
-          strongSelf->_lastSwitchTime = CACurrentMediaTime();  // Update the last switch time
-          [strongSelf switchToCamera:newCamera];
-        } else {
-          NSLog(@"[AutoLensSwitch] Delaying switch while focus is adjusting");
-        }
+      // Don't switch to ultra-wide for close objects on iPhone 12 Pro as it doesn't have macro
+    } else if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
+      // Switch from ultra-wide to wide for medium distances (more conservative)
+      if (strongSelf->_estimatedObjectDistance > 1.0 &&
+          strongSelf->_availableCamerasByType[@"Wide"]) {
+        newCamera = strongSelf->_availableCamerasByType[@"Wide"];
+        targetDeviceType = @"Wide";
       }
+    }
+
+    NSLog(@"[AutoLensSwitch] Analysis: Current=%@, Distance=%.2f", currentLens,
+          strongSelf->_estimatedObjectDistance);
+
+    // Switch to selected lens if different from current
+    if (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID]) {
+      NSLog(@"[AutoLensSwitch] Switching from %@ to %@", currentLens, newCamera.deviceType);
+      strongSelf->_lastSwitchTime = CACurrentMediaTime();
+      [strongSelf switchToCamera:newCamera];
     }
   });
 }
