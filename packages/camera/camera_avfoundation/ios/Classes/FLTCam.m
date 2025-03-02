@@ -1437,14 +1437,12 @@ NSString *const errorMethod = @"error";
     }
 
     BOOL supportsMacro = [self deviceSupportsMacro];
-
-    NSLog(@"[LensDebug] Current=%@, Distance=%.2f, SupportsMacro=%@", currentLens,
-          strongSelf->_estimatedObjectDistance, supportsMacro ? @"YES" : @"NO");
-
     // Determine which lens to use with device-appropriate thresholds
     NSString *currentLens = strongSelf->_captureDevice.deviceType;
     AVCaptureDevice *newCamera = nil;
     NSString *targetDeviceType = nil;
+    NSLog(@"[LensDebug] Current=%@, Distance=%.2f, SupportsMacro=%@", currentLens,
+          strongSelf->_estimatedObjectDistance, supportsMacro ? @"YES" : @"NO");
 
     // IMPROVED LENS SELECTION LOGIC
     if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
