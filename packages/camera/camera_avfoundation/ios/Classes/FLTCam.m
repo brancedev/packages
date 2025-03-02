@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 #import "FLTCam.h"
+#import <sys/utsname.h>
 #import "FLTCam_Test.h"
-
 @import CoreMotion;
 @import Flutter;
 #import <libkern/OSAtomic.h>
@@ -1436,8 +1436,10 @@ NSString *const errorMethod = @"error";
       return;  // Don't switch while focus is adjusting
     }
 
-    NSLog(@"[LensDebug] Current=%@, Distance=%.2f", currentLens,
-          strongSelf->_estimatedObjectDistance);
+    BOOL supportsMacro = [self deviceSupportsMacro];
+
+    NSLog(@"[LensDebug] Current=%@, Distance=%.2f, SupportsMacro=%@", currentLens,
+          strongSelf->_estimatedObjectDistance, supportsMacro ? @"YES" : @"NO");
 
     // Determine which lens to use with device-appropriate thresholds
     NSString *currentLens = strongSelf->_captureDevice.deviceType;
@@ -1453,8 +1455,8 @@ NSString *const errorMethod = @"error";
         targetDeviceType = @"Wide";
       }
     } else if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
-      if (strongSelf->_estimatedObjectDistance < 1.0) {
-        // Only switch to ultrawide for close-ups
+      if (strongSelf->_estimatedObjectDistance < 1.0 && supportsMacro) {
+        // Only switch to ultrawide for close-ups IF device supports macro
         if (strongSelf->_availableCamerasByType[@"UltraWide"]) {
           newCamera = strongSelf->_availableCamerasByType[@"UltraWide"];
           targetDeviceType = @"UltraWide";
@@ -1584,6 +1586,85 @@ NSString *const errorMethod = @"error";
       withCompletion:^(FlutterError *_Nullable error){
           // Ignore errors during restoration
       }];
+}
+
+BOOL isiPhone13ProOrLater() {
+  struct utsname systemInfo;
+  uname(&systemInfo);
+
+  NSString *deviceModel = [NSString stringWithUTF8String:systemInfo.machine];
+
+  // iPhone models that qualify (13 Pro and later)
+  NSArray *qualifyingModels = @[
+    // iPhone 13 Pro models
+    @"iPhone14,2", @"iPhone14,3",
+    // iPhone 14 models
+    @"iPhone14,4", @"iPhone14,5", @"iPhone14,7", @"iPhone14,8",
+    // iPhone 15 models
+    @"iPhone15,1", @"iPhone15,2", @"iPhone15,3", @"iPhone15,4",
+    // iPhone 16 models
+    @"iPhone16,1", @"iPhone16,2", @"iPhone16,3", @"iPhone16,4"
+  ];
+
+  // Direct model check
+  for (NSString *model in qualifyingModels) {
+    if ([deviceModel isEqualToString:model]) {
+      return YES;
+    }
+  }
+
+  // Extract numeric parts for future models
+  NSScanner *scanner = [NSScanner scannerWithString:deviceModel];
+  [scanner scanString:@"iPhone" intoString:nil];
+
+  NSInteger majorVersion;
+  [scanner scanInteger:&majorVersion];
+
+  // iPhone14,x are iPhone 13 models and later
+  return majorVersion >= 14;
+}
+
+- (BOOL)deviceSupportsMacro {
+  // First check device model to filter out older devices quickly
+  if (!isiPhone13ProOrLater()) {
+    return NO;
+  }
+
+  // For iOS 15+, use the more direct approach with triple camera check
+  if (@available(iOS 15.0, *)) {
+    AVCaptureDevice *ultraWideDevice =
+        [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInUltraWideCamera
+                                           mediaType:AVMediaTypeVideo
+                                            position:AVCaptureDevicePositionBack];
+    if (!ultraWideDevice) {
+      return NO;
+    }
+
+    // Check if this is a triple camera device (which typically has macro support)
+    AVCaptureDevice *tripleCamera =
+        [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInTripleCamera
+                                           mediaType:AVMediaTypeVideo
+                                            position:AVCaptureDevicePositionBack];
+    return (tripleCamera != nil);
+  } else {
+    // For iOS 14 and earlier, use the discovery session approach
+    NSArray *deviceTypes = @[
+      AVCaptureDeviceTypeBuiltInUltraWideCamera, AVCaptureDeviceTypeBuiltInWideAngleCamera,
+      AVCaptureDeviceTypeBuiltInTelephotoCamera
+    ];
+
+    AVCaptureDeviceDiscoverySession *discoverySession = [AVCaptureDeviceDiscoverySession
+        discoverySessionWithDeviceTypes:deviceTypes
+                              mediaType:AVMediaTypeVideo
+                               position:AVCaptureDevicePositionBack];
+
+    NSMutableArray *availableDeviceTypes = [NSMutableArray array];
+    for (AVCaptureDevice *device in discoverySession.devices) {
+      [availableDeviceTypes addObject:device.deviceType];
+    }
+
+    return ([availableDeviceTypes count] >= 3);
+  }
 }
 
 @end
