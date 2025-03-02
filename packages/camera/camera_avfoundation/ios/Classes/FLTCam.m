@@ -1459,7 +1459,7 @@ NSString *const errorMethod = @"error";
           newCamera = strongSelf->_availableCamerasByType[@"UltraWide"];
           targetDeviceType = @"UltraWide";
         }
-      } else if (strongSelf->_estimatedObjectDistance > 7.0 &&
+      } else if (strongSelf->_estimatedObjectDistance > 7.0 && isiPhone13ProOrLater() &&
                  strongSelf->_availableCamerasByType[@"Telephoto"]) {
         // Switch to telephoto for distant objects
         newCamera = strongSelf->_availableCamerasByType[@"Telephoto"];
