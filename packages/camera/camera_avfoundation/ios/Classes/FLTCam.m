@@ -1436,6 +1436,11 @@ NSString *const errorMethod = @"error";
       return;  // Don't switch while focus is adjusting
     }
 
+    BOOL supportsMacro = [self deviceSupportsMacro];
+
+    NSLog(@"[LensDebug] Current=%@, Distance=%.2f, SupportsMacro=%@", currentLens,
+          strongSelf->_estimatedObjectDistance, supportsMacro ? @"YES" : @"NO");
+
     // Determine which lens to use with device-appropriate thresholds
     NSString *currentLens = strongSelf->_captureDevice.deviceType;
     AVCaptureDevice *newCamera = nil;
@@ -1443,36 +1448,49 @@ NSString *const errorMethod = @"error";
 
     // IMPROVED LENS SELECTION LOGIC
     if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) {
-      // On telephoto, switch to wide if distance is less than 4.5 (more aggressive)
+      // Switch from telephoto to wide for closer objects
       if (strongSelf->_estimatedObjectDistance < 4.5 &&
           strongSelf->_availableCamerasByType[@"Wide"]) {
         newCamera = strongSelf->_availableCamerasByType[@"Wide"];
         targetDeviceType = @"Wide";
       }
     } else if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
-      if (strongSelf->_estimatedObjectDistance < 1.0) {
-        if (strongSelf->_availableCamerasByType[@"Macro"]) {
-          newCamera = strongSelf->_availableCamerasByType[@"Macro"];
-          targetDeviceType = @"Macro";
-        } else if (strongSelf->_availableCamerasByType[@"UltraWide"]) {
+      BOOL supportsMacro = [self deviceSupportsMacro];
+
+      if (strongSelf->_estimatedObjectDistance < 1.0 && supportsMacro) {
+        // Only switch to ultrawide for close-ups IF device supports macro
+        if (strongSelf->_availableCamerasByType[@"UltraWide"]) {
           newCamera = strongSelf->_availableCamerasByType[@"UltraWide"];
           targetDeviceType = @"UltraWide";
         }
       } else if (strongSelf->_estimatedObjectDistance > 7.0 &&
                  strongSelf->_availableCamerasByType[@"Telephoto"]) {
+        // Switch to telephoto for distant objects
         newCamera = strongSelf->_availableCamerasByType[@"Telephoto"];
         targetDeviceType = @"Telephoto";
       }
+      // Stay on wide for all other cases, including close-ups on non-macro devices
     } else if ([currentLens isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) {
-      if (strongSelf->_estimatedObjectDistance > 1.0 &&
-          strongSelf->_availableCamerasByType[@"Wide"]) {
-        newCamera = strongSelf->_availableCamerasByType[@"Wide"];
-        targetDeviceType = @"Wide";
+      // Only stay on ultrawide for close-ups if we support macro
+      if (strongSelf->_estimatedObjectDistance < 1.0 && !supportsMacro) {
+        // No macro support, switch to wide
+        if (strongSelf->_availableCamerasByType[@"Wide"]) {
+          newCamera = strongSelf->_availableCamerasByType[@"Wide"];
+          targetDeviceType = @"Wide";
+        }
+      } else if (strongSelf->_estimatedObjectDistance > 1.0) {
+        // Not close-up, switch to wide
+        if (strongSelf->_availableCamerasByType[@"Wide"]) {
+          newCamera = strongSelf->_availableCamerasByType[@"Wide"];
+          targetDeviceType = @"Wide";
+        }
       }
+      // Stay on ultrawide for close-ups if we support macro
     }
 
-    NSLog(@"[AutoLensSwitch] Analysis: Current=%@, Distance=%.2f", currentLens,
-          strongSelf->_estimatedObjectDistance);
+    NSLog(@"[LensDecision] Current=%@, Distance=%.2f, SupportsMacro=%@, NewCamera=%@", currentLens,
+          strongSelf->_estimatedObjectDistance, supportsMacro ? @"YES" : @"NO",
+          newCamera ? targetDeviceType : @"STAYING");
 
     // Switch to selected lens if different from current
     if (newCamera && ![newCamera.uniqueID isEqualToString:strongSelf->_captureDevice.uniqueID]) {
@@ -1481,6 +1499,22 @@ NSString *const errorMethod = @"error";
       [strongSelf switchToCamera:newCamera];
     }
   });
+}
+
+- (BOOL)deviceSupportsMacro {
+  AVCaptureDevice *ultraWideDevice =
+      [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInUltraWideCamera
+                                         mediaType:AVMediaTypeVideo
+                                          position:AVCaptureDevicePositionBack];
+  if (!ultraWideDevice) {
+    return NO;
+  }
+
+  if (@available(iOS 15.0, *)) {
+    return ultraWideDevice.activeFormat.supportsMacroPhotography;
+  }
+
+  return NO;
 }
 
 - (void)switchToCamera:(AVCaptureDevice *)newCamera {
